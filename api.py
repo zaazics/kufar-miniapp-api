@@ -1,22 +1,16 @@
 import json
 import asyncio
 import os
-import sys
-from pathlib import Path
-
-# Добавляем путь к проекту бота для импорта
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import re
+from datetime import datetime
 
 from aiohttp import web, ClientTimeout, ClientSession, TCPConnector
 from bs4 import BeautifulSoup
-import re
-from datetime import datetime
 
 # ============================================================
 # КОНФИГУРАЦИЯ
 # ============================================================
 
-# Заголовки для обхода блокировки
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -28,7 +22,6 @@ HEADERS = {
     "Referer": "https://www.kufar.by/"
 }
 
-# Категории
 CATEGORIES = {
     "phones": {
         "name": "📱 Телефоны",
@@ -64,15 +57,13 @@ CATEGORIES = {
 
 
 # ============================================================
-# ПАРСИНГ
+# ПАРСИНГ (без lxml)
 # ============================================================
 
 async def fetch_page(url: str) -> str | None:
-    """Загружает страницу"""
     try:
         timeout = ClientTimeout(total=15)
         connector = TCPConnector(ssl=False)
-        
         async with ClientSession(connector=connector, timeout=timeout) as session:
             async with session.get(url, headers=HEADERS) as response:
                 if response.status == 200:
@@ -86,8 +77,8 @@ async def fetch_page(url: str) -> str | None:
 
 
 def extract_ads(html: str, category: str = None) -> list:
-    """Извлекает объявления из HTML"""
-    soup = BeautifulSoup(html, "lxml")
+    # Используем html.parser вместо lxml
+    soup = BeautifulSoup(html, "html.parser")
     ads = []
     
     cards_container = soup.find('div', class_='styles_cards___qpff')
@@ -111,11 +102,9 @@ def extract_ads(html: str, category: str = None) -> list:
             title_tag = card.find('h3', class_='styles_title__ARIVF')
             title = title_tag.text.strip() if title_tag else "Без названия"
             
-            # Фильтр по категории
             if keywords and not any(k.lower() in title.lower() for k in keywords):
                 continue
             
-            # Цена
             price_tag = card.find('p', class_='styles_price__9JZaB')
             if price_tag:
                 price_span = price_tag.find('span')
@@ -123,7 +112,6 @@ def extract_ads(html: str, category: str = None) -> list:
             else:
                 price = "Цена не указана"
             
-            # Город
             city_tag = card.find('div', class_='styles_secondary__NEYhw')
             city = "Город не указан"
             if city_tag:
@@ -131,11 +119,9 @@ def extract_ads(html: str, category: str = None) -> list:
                 if city_p:
                     city = city_p.text.strip()
             
-            # Время
             time_tag = card.find('time')
             time_published = time_tag.text.strip() if time_tag else "Не указано"
             
-            # Числовое значение цены
             price_value = None
             price_clean = re.sub(r'[^\d]', '', price) if price else ''
             if price_clean:
@@ -144,21 +130,13 @@ def extract_ads(html: str, category: str = None) -> list:
                 except:
                     pass
             
-            # Характеристики (память)
-            memory = None
-            memory_match = re.search(r'(\d+)\s*гб', title.lower())
-            if memory_match:
-                memory = int(memory_match.group(1))
-            
             ad = {
                 "title": title,
                 "price": price,
                 "price_value": price_value,
                 "city": city,
                 "time": time_published,
-                "url": url,
-                "memory": memory,
-                "condition": "❓ Состояние не указано"
+                "url": url
             }
             ads.append(ad)
             
@@ -170,7 +148,6 @@ def extract_ads(html: str, category: str = None) -> list:
 
 
 def calculate_average_price(ads: list) -> float:
-    """Рассчитывает среднюю цену (с удалением выбросов)"""
     prices = [a['price_value'] for a in ads if a.get('price_value')]
     if len(prices) < 3:
         return sum(prices) / len(prices) if prices else 0
@@ -184,14 +161,12 @@ def calculate_average_price(ads: list) -> float:
 
 
 def analyze_prices(ads: list) -> dict:
-    """Анализ цен"""
     if not ads:
         return {"ads": [], "avg_price": 0, "best_deal": None}
     
     avg_price = calculate_average_price(ads)
     best_deal = None
     
-    # Находим лучшее предложение (цена ниже средней на 15%+)
     for ad in ads:
         if ad.get('price_value') and avg_price:
             diff = avg_price - ad['price_value']
@@ -211,11 +186,9 @@ def analyze_prices(ads: list) -> dict:
 
 
 def filter_by_price(ads: list, price_filter: str) -> list:
-    """Фильтрация по цене"""
     if price_filter == 'all':
         return ads
     
-    filtered = []
     ranges = {
         '0-100': (0, 100),
         '100-300': (100, 300),
@@ -225,16 +198,10 @@ def filter_by_price(ads: list, price_filter: str) -> list:
     }
     
     min_price, max_price = ranges.get(price_filter, (0, float('inf')))
-    for ad in ads:
-        price = ad.get('price_value')
-        if price and min_price <= price <= max_price:
-            filtered.append(ad)
-    
-    return filtered
+    return [a for a in ads if a.get('price_value') and min_price <= a['price_value'] <= max_price]
 
 
 def filter_by_city(ads: list, city_filter: str) -> list:
-    """Фильтрация по городу"""
     if city_filter == 'all':
         return ads
     
@@ -255,37 +222,32 @@ def filter_by_city(ads: list, city_filter: str) -> list:
 
 
 # ============================================================
-# ХРАНИЛИЩЕ ИЗБРАННОГО (временное)
+# ХРАНИЛИЩЕ
 # ============================================================
 
-favorites = {}  # user_id -> [urls]
+favorites = {}
 
 def add_favorite(user_id: int, ad: dict):
-    """Добавляет в избранное"""
     if user_id not in favorites:
         favorites[user_id] = []
-    # Проверяем, нет ли уже
     if not any(f['url'] == ad['url'] for f in favorites[user_id]):
         favorites[user_id].append(ad)
     return favorites[user_id]
 
 def remove_favorite(user_id: int, url: str):
-    """Удаляет из избранного"""
     if user_id in favorites:
         favorites[user_id] = [f for f in favorites[user_id] if f['url'] != url]
     return favorites.get(user_id, [])
 
 def get_favorites(user_id: int) -> list:
-    """Получает избранное"""
     return favorites.get(user_id, [])
 
 
 # ============================================================
-# API ОБРАБОТЧИКИ
+# API
 # ============================================================
 
 async def handle_api(request):
-    """Главный обработчик API"""
     try:
         if request.method == 'GET':
             return await handle_get(request)
@@ -298,7 +260,6 @@ async def handle_api(request):
 
 
 async def handle_get(request):
-    """GET запросы"""
     params = request.query
     action = params.get('action')
     
@@ -315,7 +276,6 @@ async def handle_get(request):
 
 
 async def handle_post(request):
-    """POST запросы"""
     data = await request.json()
     action = data.get('action')
     
@@ -327,10 +287,7 @@ async def handle_post(request):
     return web.json_response({"error": "Неизвестное действие"})
 
 
-# ===== ОСНОВНЫЕ ОБРАБОТЧИКИ =====
-
 async def get_ads_handler(params):
-    """Получение объявлений"""
     category = params.get('category', 'phones')
     page = int(params.get('page', 1))
     search = params.get('search', '').strip()
@@ -338,54 +295,42 @@ async def get_ads_handler(params):
     city_filter = params.get('city', 'all')
     user_id = params.get('user_id')
     
-    # URL
     category_data = CATEGORIES.get(category)
     if not category_data:
         return web.json_response({"error": "Категория не найдена"})
     
     url = f"{category_data['url']}?sort=lst.d"
     
-    # Парсим
     html = await fetch_page(url)
     if not html:
         return web.json_response({"error": "Не удалось загрузить страницу"})
     
     ads = extract_ads(html, category)
     
-    # Поиск
     if search:
         ads = [a for a in ads if search.lower() in a.get('title', '').lower()]
     
-    # Фильтры
     ads = filter_by_city(ads, city_filter)
     ads = filter_by_price(ads, price_filter)
     
-    # Анализ цен
     analysis = analyze_prices(ads)
     avg_price = analysis['avg_price']
     best_deal = analysis['best_deal']
     
-    # Обогащаем данные
     for ad in ads:
-        if best_deal and ad.get('url') == best_deal.get('url'):
-            ad['is_best'] = True
-        else:
-            ad['is_best'] = False
-        
+        ad['is_best'] = best_deal and ad.get('url') == best_deal.get('url')
         if avg_price and ad.get('price_value'):
             diff = avg_price - ad['price_value']
             if diff > 0:
                 ad['savings'] = round(diff, 2)
                 ad['savings_percent'] = round((diff / avg_price) * 100, 1)
     
-    # Избранное
     if user_id:
         favs = get_favorites(int(user_id))
         fav_urls = [f['url'] for f in favs]
         for ad in ads:
             ad['is_favorite'] = ad.get('url') in fav_urls
     
-    # Пагинация
     ads_per_page = 5
     total = len(ads)
     total_pages = max(1, (total + ads_per_page - 1) // ads_per_page)
@@ -404,28 +349,18 @@ async def get_ads_handler(params):
 
 
 async def get_favorites_handler(params):
-    """Получение избранного"""
     user_id = params.get('user_id')
     if not user_id:
         return web.json_response({"favorites": []})
-    
-    favs = get_favorites(int(user_id))
-    return web.json_response({"favorites": favs})
+    return web.json_response({"favorites": get_favorites(int(user_id))})
 
 
-async def get_categories_handler(params=None):
-    """Получение категорий"""
-    categories = []
-    for key, cat in CATEGORIES.items():
-        categories.append({
-            "key": key,
-            "name": cat['name']
-        })
+async def get_categories_handler():
+    categories = [{"key": key, "name": cat['name']} for key, cat in CATEGORIES.items()]
     return web.json_response({"categories": categories})
 
 
 async def save_ad_handler(data):
-    """Сохранение в избранное"""
     user_id = data.get('user_id')
     if not user_id:
         return web.json_response({"error": "Не указан пользователь"})
@@ -443,7 +378,6 @@ async def save_ad_handler(data):
 
 
 async def remove_favorite_handler(data):
-    """Удаление из избранного"""
     user_id = data.get('user_id')
     url = data.get('url')
     
@@ -455,23 +389,21 @@ async def remove_favorite_handler(data):
 
 
 # ============================================================
-# ЗАПУСК СЕРВЕРА
+# ЗАПУСК
 # ============================================================
 
 async def health_check(request):
-    """Health check для Render"""
     return web.json_response({"status": "OK", "service": "kufar-miniapp-api"})
 
 
 async def start_api_server():
-    """Запуск API сервера"""
     app = web.Application()
     app.router.add_get('/api', handle_api)
     app.router.add_post('/api', handle_api)
     app.router.add_get('/health', health_check)
     app.router.add_get('/', health_check)
     
-    # CORS заголовки
+    # CORS
     async def cors_middleware(app, handler):
         async def middleware(request):
             response = await handler(request)
@@ -493,7 +425,6 @@ async def start_api_server():
     print(f"📍 Health check: http://localhost:{port}/health")
     print(f"📍 API: http://localhost:{port}/api")
     
-    # Держим сервер запущенным
     while True:
         await asyncio.sleep(3600)
 
