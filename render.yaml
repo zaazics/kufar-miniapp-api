@@ -6,6 +6,7 @@ services:
     startCommand: python api.py
     plan: free
     healthCheckPath: /health
+    pythonVersion: "3.11.10"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.10
